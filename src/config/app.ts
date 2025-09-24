@@ -11,7 +11,7 @@
 
 import type {TrueDcId} from '../types';
 
-export const MAIN_DOMAINS = ['web.telegram.org', 'webk.telegram.org'];
+export const MAIN_DOMAINS = ['tweb.hostforever.org', 'webk.telegram.org'];
 export const DEFAULT_BACKGROUND_SLUG = 'pattern';
 
 const threads = Math.min(4, navigator.hardwareConcurrency ?? 4);
