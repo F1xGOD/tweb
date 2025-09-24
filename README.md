@@ -1,4 +1,7 @@
 ## Telegram Web K
+> [!CAUTION]
+> UNOFFICIAL FORK, DO NOT USE!!!
+
 Based on Webogram, patched and improved. Available for everyone here: https://web.telegram.org/k/
 
 
