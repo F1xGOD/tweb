@@ -11,14 +11,16 @@
 
 import {TLDeserialization, TLSerialization} from './tl_utils';
 import CryptoWorker from '../crypto/cryptoMessagePort';
+import sessionStorage from '../sessionStorage';
 import Schema from './schema';
 import {NetworkerFactory} from './networkerFactory';
 import {logger, LogTypes} from '../logger';
-import {DcId, InvokeApiOptions} from '../../types';
+import {InvokeApiOptions} from '../../types';
 import longToBytes from '../../helpers/long/longToBytes';
 import MTTransport from './transports/transport';
-import {nextRandomUint, randomBytes, randomLong} from '../../helpers/random';
+import {nextRandomUint, randomLong} from '../../helpers/random';
 import App from '../../config/app';
+import DEBUG from '../../config/debug';
 import Modes from '../../config/modes';
 import noop from '../../helpers/noop';
 import HTTP from './transports/http';
@@ -29,9 +31,11 @@ import ctx from '../../environment/ctx';
 import bufferConcats from '../../helpers/bytes/bufferConcats';
 import bytesCmp from '../../helpers/bytes/bytesCmp';
 import bytesToHex from '../../helpers/bytes/bytesToHex';
+import convertToUint8Array from '../../helpers/bytes/convertToUint8Array';
 import isObject from '../../helpers/object/isObject';
 import forEachReverse from '../../helpers/array/forEachReverse';
 import sortLongsArray from '../../helpers/long/sortLongsArray';
+import randomize from '../../helpers/array/randomize';
 import deferredPromise, {CancellablePromise} from '../../helpers/cancellablePromise';
 import pause from '../../helpers/schedulers/pause';
 import {getEnvironment} from '../../environment/utils';
@@ -40,10 +44,7 @@ import indexOfAndSplice from '../../helpers/array/indexOfAndSplice';
 import {ActiveAccountNumber} from '../accounts/types';
 import AccountController from '../accounts/accountController';
 import makeError from '../../helpers/makeError';
-import {bigIntFromBytes} from '../../helpers/bigInt/bigIntConversion';
-import safeAssign from '../../helpers/object/safeAssign';
-import {MTAuthKey} from './authorizer';
-import {MessageKeyUtils} from './messageKeyUtils';
+import {TELEGRAM_CLIENT} from '../../config/clientIdentity';
 
 // console.error('networker included!', new Error().stack);
 
@@ -130,9 +131,7 @@ let invokeAfterMsgConstructor: number;
 let networkerTempId = 0;
 
 export default class MTPNetworker {
-  public dcId: DcId;
-  private permAuthKey: MTAuthKey;
-  private authKey: MTAuthKey;
+  private authKeyUint8: Uint8Array;
 
   public isFileNetworker: boolean;
   private isFileUpload: boolean;
@@ -202,37 +201,33 @@ export default class MTPNetworker {
 
   // public onConnectionStatusChange: (online: boolean) => void;
 
+  // private debugRequests: Array<{before: Uint8Array, after: Uint8Array}> = [];
+
   private delays: typeof delays[keyof typeof delays];
   // private getNewTimeOffset: boolean;
 
-  private usingPfs: boolean;
-
-  private networkerFactory: NetworkerFactory;
-  private timeManager: TimeManager;
-
-  private accountNumber: ActiveAccountNumber;
-
-  constructor(options: {
-    networkerFactory: NetworkerFactory,
-    timeManager: TimeManager,
-    dcId: DcId,
-    permAuthKey: MTAuthKey,
-    authKey: MTAuthKey,
+  constructor(
+    private networkerFactory: NetworkerFactory,
+    private timeManager: TimeManager,
+    public dcId: number,
+    private authKey: Uint8Array,
+    private authKeyId: Uint8Array,
     serverSalt: Uint8Array,
-    isFileUpload: boolean,
-    isFileDownload: boolean,
-    accountNumber: ActiveAccountNumber
-  }) {
-    safeAssign(this, options);
-    this.usingPfs = this.permAuthKey !== this.authKey;
+    private accountNumber: ActiveAccountNumber,
+    options: InvokeApiOptions = {}
+  ) {
+    this.authKeyUint8 = convertToUint8Array(this.authKey);
+    this.serverSalt = convertToUint8Array(serverSalt);
 
+    this.isFileUpload = !!options.fileUpload;
+    this.isFileDownload = !!options.fileDownload;
     this.isFileNetworker = this.isFileUpload || this.isFileDownload;
     this.delays = this.isFileNetworker ? delays.file : delays.client;
 
     const suffix = this.isFileUpload ? '-U' : this.isFileDownload ? '-D' : '';
-    this.name = 'NET-' + this.dcId + suffix;
+    this.name = 'NET-' + dcId + suffix;
     // this.log = logger(this.name, this.upload && this.dcId === 2 ? LogLevels.debug | LogLevels.warn | LogLevels.log | LogLevels.error : LogLevels.error);
-    this.log = this.networkerFactory.createLogger(
+    this.log = logger(
       this.name + (suffix ? '' : '-C') + '-' + networkerTempId++,
       LogTypes.Log | LogTypes.Error | LogTypes.Warn | (this.debug ? LogTypes.Debug : 0)
     );
@@ -245,13 +240,18 @@ export default class MTPNetworker {
     } */
 
     this.updateSession();
+
+    // if(!NetworkerFactory.offlineInited) {
+    //   NetworkerFactory.offlineInited = true;
+    //   /* rootScope.offline = true
+    //   rootScope.offlineConnecting = true */
+    // }
   }
 
   private updateSession() {
-    this.log('update session');
     this.seqNo = 0;
     this.prevSessionId = this.sessionId;
-    this.sessionId = randomBytes(8);
+    this.sessionId = randomize(new Uint8Array(8));
   }
 
   private updateSentMessage(sentMessageId: MTLong) {
@@ -346,7 +346,47 @@ export default class MTPNetworker {
     return this.pushMessage(message, options);
   }
 
-  private storeApiCall(serializer: TLSerialization, method: string, params: any, options: InvokeApiOptions, log: ReturnType<typeof logger>) {
+  public wrapApiCall(method: string, params: any = {}, options: InvokeApiOptions = {}) {
+    const log = this.log.bindPrefix('wrapApiCall');
+    const serializer = new TLSerialization(options);
+
+    if(!this.connectionInited) { // this will call once for each new session
+      log('adding invokeWithLayer');
+
+      const invokeWithLayer = Schema.API.methods.find((m) => m.method === 'invokeWithLayer');
+      if(!invokeWithLayer) throw new Error('no invokeWithLayer!');
+      serializer.storeInt(+invokeWithLayer.id, 'invokeWithLayer');
+
+      serializer.storeInt(Schema.layer, 'layer');
+
+      const initConnection = Schema.API.methods.find((m) => m.method === 'initConnection');
+      if(!initConnection) throw new Error('no initConnection!');
+
+      serializer.storeInt(+initConnection.id, 'initConnection');
+      serializer.storeInt(0x0, 'flags');
+      serializer.storeInt(App.id, 'api_id');
+      const deviceModel = TELEGRAM_CLIENT.deviceModel || getEnvironment().USER_AGENT || 'Unknown UserAgent';
+      const systemVersion = TELEGRAM_CLIENT.systemVersion || (typeof navigator !== 'undefined' ? navigator.platform : '') || 'Unknown Platform';
+      const appVersion = TELEGRAM_CLIENT.appVersion || (App.version + (App.isMainDomain ? ' ' + App.suffix : ''));
+      serializer.storeString(deviceModel, 'device_model');
+      serializer.storeString(systemVersion, 'system_version');
+      serializer.storeString(appVersion, 'app_version');
+      serializer.storeString(navigator.language || 'en', 'system_lang_code');
+      serializer.storeString(App.langPack, 'lang_pack');
+      serializer.storeString(this.networkerFactory.language, 'lang_code');
+      // serializer.storeInt(0x0, 'proxy');
+      /* serializer.storeMethod('initConnection', {
+        'flags': 0,
+        'api_id': App.id,
+        'device_model': navigator.userAgent || 'Unknown UserAgent',
+        'system_version': navigator.platform || 'Unknown Platform',
+        'app_version': App.version,
+        'system_lang_code': navigator.language || 'en',
+        'lang_pack': '',
+        'lang_code': navigator.language || 'en'
+      }); */
+    }
+
     if(options.afterMessageId) {
       if(invokeAfterMsgConstructor === undefined) {
         const m = Schema.API.methods.find((m) => m.method === 'invokeAfterMsg');
@@ -363,44 +403,8 @@ export default class MTPNetworker {
     }
 
     options.resultType = serializer.storeMethod(method, params);
-  }
 
-  public wrapApiCall(method: string, params: any = {}, options: InvokeApiOptions = {}): Promise<any> {
-    if(this.usingPfs && !this.authKey.wrappedBinding) {
-      const promise = this.authKey.wrapBindPromise ??= this.wrapBindAuthKeyCall(this.authKey.expiresAt);
-      return promise.then(() => {
-        return this.wrapApiCall(method, params, options);
-      });
-    }
-
-    const log = this.log.bindPrefix('wrapApiCall');
-    const serializer = new TLSerialization(options);
-
-    if(!this.connectionInited) { // this will call once for each new session
-      log('adding invokeWithLayer');
-
-      serializer.storeMethod('invokeWithLayer', {
-        layer: Schema.layer,
-        query: (serializer: TLSerialization) => {
-          serializer.storeMethod('initConnection', {
-            api_id: App.id,
-            device_model: getEnvironment().USER_AGENT || 'Unknown UserAgent',
-            system_version: navigator.platform || 'Unknown Platform',
-            app_version: App.version + (App.isMainDomain ? ' ' + App.suffix : ''),
-            system_lang_code: navigator.language || 'en',
-            lang_pack: App.langPack,
-            lang_code: this.networkerFactory.language,
-            query: (serializer: TLSerialization) => {
-              this.storeApiCall(serializer, method, params, options, log);
-            }
-          });
-        }
-      });
-    } else {
-      this.storeApiCall(serializer, method, params, options, log);
-    }
-
-    const messageId = options.msg_id ?? this.timeManager.generateId();
+    const messageId = this.timeManager.generateId();
     const seqNo = this.generateSeqNo();
     const message: MTMessage = {
       msg_id: messageId,
@@ -413,44 +417,6 @@ export default class MTPNetworker {
     log('call', method, message, params, options);
 
     return this.pushMessage(message, options);
-  }
-
-  public async wrapBindAuthKeyCall(expiresAt: number) {
-    this.log('will bind temp auth key', expiresAt);
-
-    const permAuthKeyIdLong = bigIntFromBytes([...this.permAuthKey.id].reverse()).toString();
-    const nonce = bigIntFromBytes(randomBytes(8)).toString();
-    const msg_id = this.timeManager.generateId();
-
-    const serializer = new TLSerialization({mtproto: true});
-    serializer.storeObject({
-      _: 'bind_auth_key_inner',
-      nonce,
-      temp_auth_key_id: bigIntFromBytes([...this.authKey.id].reverse()).toString(),
-      perm_auth_key_id: permAuthKeyIdLong,
-      temp_session_id: bigIntFromBytes([...this.sessionId].reverse()).toString(),
-      expires_at: expiresAt
-    }, 'BindAuthKeyInner');
-    const body = serializer.getBytes(true);
-
-    const encrypted = await this.getEncryptedOutput({
-      body,
-      msg_id,
-      seq_no: 0
-    }, true);
-
-    this.authKey.wrappedBinding = true;
-    delete this.authKey.wrapBindPromise;
-
-    this.connectionInited = false;
-    this.wrapApiCall('auth.bindTempAuthKey', {
-      perm_auth_key_id: permAuthKeyIdLong,
-      nonce,
-      expires_at: expiresAt,
-      encrypted_message: encrypted
-    }, {
-      msg_id
-    });
   }
 
   public changeTransport(transport?: MTTransport) {
@@ -904,7 +870,7 @@ export default class MTPNetworker {
 
   private async getBaseDcId() {
     const accountData = await AccountController.get(this.accountNumber);
-    return accountData.dcId;
+    return accountData?.dcId;
   }
 
   public attachPromise(promise: Promise<any>, message: MTMessage) {
@@ -1030,6 +996,49 @@ export default class MTPNetworker {
     log('push', sentMessage, delay);
 
     this.scheduleRequest(delay);
+  }
+
+  // * correct, fully checked
+  private async getMsgKey(dataWithPadding: Uint8Array, isOut: boolean) {
+    const x = isOut ? 0 : 8;
+    const msgKeyLargePlain = bufferConcats(this.authKeyUint8.subarray(88 + x, 88 + x + 32), dataWithPadding);
+
+    const msgKeyLarge = await CryptoWorker.invokeCrypto('sha256', msgKeyLargePlain);
+    const msgKey = new Uint8Array(msgKeyLarge).subarray(8, 24);
+    return msgKey;
+  };
+
+  // * correct, fully checked
+  private async getAesKeyIv(msgKey: Uint8Array, isOut: boolean): Promise<[Uint8Array, Uint8Array]> {
+    const x = isOut ? 0 : 8;
+    const sha2aText = new Uint8Array(52);
+    const sha2bText = new Uint8Array(52);
+    const promises: Array<Promise<Uint8Array>> = [];
+
+    sha2aText.set(msgKey, 0);
+    sha2aText.set(this.authKeyUint8.subarray(x, x + 36), 16);
+    promises.push(CryptoWorker.invokeCrypto('sha256', sha2aText));
+
+    sha2bText.set(this.authKeyUint8.subarray(40 + x, 40 + x + 36), 0);
+    sha2bText.set(msgKey, 36);
+    promises.push(CryptoWorker.invokeCrypto('sha256', sha2bText));
+
+    const results = await Promise.all(promises);
+
+    const aesKey = new Uint8Array(32);
+    const aesIv = new Uint8Array(32);
+    const sha2a = new Uint8Array(results[0]);
+    const sha2b = new Uint8Array(results[1]);
+
+    aesKey.set(sha2a.subarray(0, 8));
+    aesKey.set(sha2b.subarray(8, 24), 8);
+    aesKey.set(sha2a.subarray(24, 32), 24);
+
+    aesIv.set(sha2b.subarray(0, 8));
+    aesIv.set(sha2a.subarray(8, 24), 8);
+    aesIv.set(sha2b.subarray(24, 32), 24);
+
+    return [aesKey, aesIv];
   }
 
   public isStopped() {
@@ -1245,91 +1254,116 @@ export default class MTPNetworker {
     };
   }
 
-  private async getEncryptedMessage(dataWithPadding: Uint8Array, padding: number, v1?: boolean) {
-    const msgKey = await MessageKeyUtils.getMsgKey(
-      this.authKey.key,
-      padding && v1 ? dataWithPadding.subarray(0, -padding) : dataWithPadding,
-      false,
-      v1
-    );
+  private async getEncryptedMessage(dataWithPadding: Uint8Array) {
+    const msgKey = await this.getMsgKey(dataWithPadding, true);
+    const keyIv = await this.getAesKeyIv(msgKey, true);
+    // this.log('after msg key iv')
 
-    const messageKeyData = await MessageKeyUtils.getAesKeyIv(
-      (v1 ? this.permAuthKey : this.authKey).key,
-      msgKey,
-      false,
-      v1
-    );
-
-    const encryptedBytes = await CryptoWorker.invokeCrypto(
-      'aes-encrypt',
-      dataWithPadding,
-      messageKeyData.aesKey,
-      messageKeyData.aesIv
-    );
+    const encryptedBytes = await CryptoWorker.invokeCrypto('aes-encrypt', dataWithPadding, keyIv[0], keyIv[1]);
+    // this.log('Finish encrypt')
 
     return {
       bytes: encryptedBytes,
-      msgKey,
-      messageKeyData
+      msgKey
     };
   }
 
   private async getDecryptedMessage(msgKey: Uint8Array, encryptedData: Uint8Array) {
-    const messageKeyData = await MessageKeyUtils.getAesKeyIv(
-      this.authKey.key,
-      msgKey,
-      true
-    );
-
-    return CryptoWorker.invokeCrypto(
-      'aes-decrypt',
-      encryptedData,
-      messageKeyData.aesKey,
-      messageKeyData.aesIv
-    );
+    // this.log('get decrypted start')
+    const keyIv = await this.getAesKeyIv(msgKey, false);
+    // this.log('after msg key iv')
+    return CryptoWorker.invokeCrypto('aes-decrypt', encryptedData, keyIv[0], keyIv[1]);
   }
 
-  private async getEncryptedOutput(message: MTMessage, v1?: boolean) {
-    const messageLength = message.body.length;
+  private async getEncryptedOutput(message: MTMessage) {
+    /* if(DEBUG) {
+      this.log.debug('Send encrypted', message, this.authKeyId);
+    } */
+    /* if(!this.isOnline) {
+      this.log('trying to send message when offline:', Object.assign({}, message));
+      //debugger;
+    } */
+
     const data = new TLSerialization({
-      startMaxLength: messageLength + 2048
+      startMaxLength: message.body.length + 2048
     });
 
-    if(v1) {
-      const random = randomBytes(128 / 8);
-      data.storeIntBytes(random, 128, 'random');
-    } else {
-      data.storeIntBytes(this.serverSalt, 64, 'salt');
-      data.storeIntBytes(this.sessionId, 64, 'session_id');
-    }
+    data.storeIntBytes(this.serverSalt, 64, 'salt');
+    data.storeIntBytes(this.sessionId, 64, 'session_id');
 
     data.storeLong(message.msg_id, 'message_id');
     data.storeInt(message.seq_no, 'seq_no');
 
-    data.storeInt(messageLength, 'message_data_length');
+    data.storeInt(message.body.length, 'message_data_length');
     data.storeRawBytes(message.body, 'message_data');
 
-    let paddingLength = (16 - (data.getOffset() % 16)) + 16 * (1 + nextRandomUint(8) % 5);
-    if(v1) {
-      paddingLength = (32 + messageLength) % 16;
-      if(paddingLength) {
-        paddingLength = 16 - paddingLength;
-      }
+    /* const des = new TLDeserialization(data.getBuffer().slice(16));
+    const desSalt = des.fetchLong();
+    const desSessionId = des.fetchLong();
+
+    if(!this.isOnline) {
+      this.log.error('trying to send message when offline', message, new Uint8Array(des.buffer), desSalt, desSessionId);
+    } */
+
+    /* const messageDataLength = message.body.length;
+    let canBeLength = 0; // bytes
+    canBeLength += 8;
+    canBeLength += 8;
+    canBeLength += 8;
+    canBeLength += 4;
+    canBeLength += 4;
+    canBeLength += message.body.length; */
+
+    const dataBuffer = data.getBuffer();
+
+    /* if(dataBuffer.byteLength !== canBeLength || !bytesCmp(new Uint8Array(dataBuffer.slice(dataBuffer.byteLength - message.body.length)), new Uint8Array(message.body))) {
+      this.log.error('wrong length', dataBuffer, canBeLength, message.msg_id);
+    } */
+
+    const paddingLength = (16 - (data.getOffset() % 16)) + 16 * (1 + nextRandomUint(8) % 5);
+    const padding = /* (message as any).padding ||  */randomize(new Uint8Array(paddingLength))/* .fill(0) */;
+    /* const padding = [167, 148, 207, 226, 86, 192, 193, 57, 124, 153, 174, 145, 159, 1, 5, 70, 127, 157,
+      51, 241, 46, 85, 141, 212, 139, 234, 213, 164, 197, 116, 245, 70, 184, 40, 40, 201, 233, 211, 150,
+      94, 57, 84, 1, 135, 108, 253, 34, 139, 222, 208, 71, 214, 90, 67, 36, 28, 167, 148, 207, 226, 86, 192, 193, 57, 124, 153, 174, 145, 159, 1, 5, 70, 127, 157,
+      51, 241, 46, 85, 141, 212, 139, 234, 213, 164, 197, 116, 245, 70, 184, 40, 40, 201, 233, 211, 150,
+      94, 57, 84, 1, 135, 108, 253, 34, 139, 222, 208, 71, 214, 90, 67, 36, 28].slice(0, paddingLength); */
+
+    // (message as any).padding = padding;
+
+    const dataWithPadding = bufferConcats(dataBuffer, padding);
+    // this.log('Adding padding', dataBuffer, padding, dataWithPadding)
+    // this.log('auth_key_id', bytesToHex(self.authKeyID))
+
+    /* if(dataWithPadding.byteLength % 16) {
+      this.log.error('aaa', dataWithPadding, paddingLength);
     }
 
-    const padding = randomBytes(paddingLength);
-    const dataWithPadding = bufferConcats(data.getBuffer(), padding);
+    if(message.fileUpload) {
+      this.log('Send encrypted: body length:', (message.body as ArrayBuffer).byteLength, paddingLength, dataWithPadding);
+    } */
 
-    const encryptedResult = await this.getEncryptedMessage(dataWithPadding, paddingLength, v1);
+    // * full next block is correct
+    const encryptedResult = await this.getEncryptedMessage(dataWithPadding);
+    /* if(DEBUG) {
+      this.log('Got encrypted out message', encryptedResult);
+    } */
 
     const request = new TLSerialization({
       startMaxLength: encryptedResult.bytes.length + 256
     });
-    request.storeIntBytes((v1 ? this.permAuthKey : this.authKey).id, 64, 'auth_key_id');
+    request.storeIntBytes(this.authKeyId, 64, 'auth_key_id');
     request.storeIntBytes(encryptedResult.msgKey, 128, 'msg_key');
     request.storeRawBytes(encryptedResult.bytes, 'encrypted_data');
 
     const requestData = request.getBytes(true);
+
+    // if(this.isFileNetworker) {
+    //   //this.log('Send encrypted: requestData length:', requestData.length, requestData.length % 16, paddingLength % 16, paddingLength, data.offset, encryptedResult.msgKey.length % 16, encryptedResult.bytes.length % 16);
+    //   //this.log('Send encrypted: messageId:', message.msg_id, requestData.length);
+    //   //this.log('Send encrypted:', message, new Uint8Array(bufferConcat(des.buffer, padding)), requestData, this.serverSalt.hex, this.sessionId.hex/* new Uint8Array(des.buffer) */);
+    //   this.debugRequests.push({before: new Uint8Array(bufferConcat(des.buffer, padding)), after: requestData});
+    // }
+
     return requestData;
   }
 
@@ -1390,11 +1424,8 @@ export default class MTPNetworker {
     let deserializer = new TLDeserialization(responseBuffer);
 
     const authKeyId = deserializer.fetchIntBytes(64, true, 'auth_key_id');
-    if(!bytesCmp(authKeyId, this.authKey.id)) {
-      const hex = bytesToHex(authKeyId.slice().reverse());
-      const possibleNumber = 0xffffffff - parseInt(hex, 16);
-      throw new Error('[MT] Invalid auth_key_id error: ' + possibleNumber + ' ' + hex);
-      // throw new Error('[MT] Invalid server auth_key_id: ' + bytesToHex(authKeyId));
+    if(!bytesCmp(authKeyId, this.authKeyId)) {
+      throw new Error('[MT] Invalid server auth_key_id: ' + bytesToHex(authKeyId));
     }
 
     const msgKey = deserializer.fetchIntBytes(128, true, 'msg_key');
@@ -1402,7 +1433,7 @@ export default class MTPNetworker {
 
     const dataWithPadding = await this.getDecryptedMessage(msgKey, encryptedData);
     // this.log('after decrypt')
-    const calcMsgKey = await MessageKeyUtils.getMsgKey(this.authKey.key, dataWithPadding, true);
+    const calcMsgKey = await this.getMsgKey(dataWithPadding, false);
     if(!bytesCmp(msgKey, calcMsgKey)) {
       this.log.warn('[MT] msg_keys', msgKey, calcMsgKey);
       this.updateSession(); // fix 28.01.2020
@@ -1454,7 +1485,8 @@ export default class MTPNetworker {
   }
 
   private parseResponseMessageBody(messageBody: Uint8Array) {
-    const deserializer = new TLDeserialization<MTLong>(messageBody, {
+    // let buffer = bytesToArrayBuffer(messageBody);
+    const deserializer = new TLDeserialization<MTLong>(/* buffer */messageBody, {
       mtproto: true,
       override: {
         mt_message: (result: any, field: string) => {
@@ -1463,6 +1495,8 @@ export default class MTPNetworker {
           result.bytes = deserializer.fetchInt(field + '[bytes]');
 
           const offset = deserializer.getOffset();
+
+          // this.log('mt_message!!!!!', result, field);
 
           try {
             result.body = deserializer.fetchObject('Object', field + '[body]');
@@ -1506,11 +1540,9 @@ export default class MTPNetworker {
   private applyServerSalt(newServerSalt: string) {
     const serverSalt = longToBytes(newServerSalt);
 
-    // if(this.usingPfs) {
     AccountController.update(this.accountNumber, {
-      [`dc${this.dcId}_server_salt`]: bytesToHex(serverSalt)
+      ['dc' + this.dcId + '_server_salt']: bytesToHex(serverSalt)
     });
-    // }
 
     this.serverSalt = new Uint8Array(serverSalt);
   }
@@ -1804,6 +1836,7 @@ export default class MTPNetworker {
 
             const changedTimeOffset = this.applyServerTime(messageId);
             if(message.error_code === 17 || changedTimeOffset) {
+              log('update session');
               this.updateSession();
             }
 
