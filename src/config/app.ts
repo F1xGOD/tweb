@@ -16,9 +16,11 @@ export const MAIN_DOMAINS = ['tweb.hostforever.org', 'webk.telegram.org'];
 export const DEFAULT_BACKGROUND_SLUG = 'pattern';
 
 const threads = Math.min(4, navigator.hardwareConcurrency ?? 4);
+const FALLBACK_API_ID = 29718886;
+const FALLBACK_API_HASH = 'a47426984744c41f207db51f48f9304e';
 const envApiId = Number.parseInt(`${import.meta.env.VITE_API_ID ?? ''}`, 10);
-const defaultApiId = Number.isFinite(envApiId) ? envApiId : 0;
-const defaultApiHash = import.meta.env.VITE_API_HASH;
+const defaultApiId = Number.isFinite(envApiId) ? envApiId : FALLBACK_API_ID;
+const defaultApiHash = import.meta.env.VITE_API_HASH || FALLBACK_API_HASH;
 
 const App = {
   id: resolveApiId(defaultApiId),
@@ -37,12 +39,5 @@ const App = {
   threads,
   cryptoWorkers: threads
 };
-
-const hasCustomCredentials = TELEGRAM_CLIENT.apiId !== undefined || TELEGRAM_CLIENT.apiHash !== undefined;
-
-if(App.isMainDomain && !hasCustomCredentials) { // use Webogram credentials then
-  App.id = 2496;
-  App.hash = '8da85b0d5bfe62527e5b244c209159c3';
-}
 
 export default App;

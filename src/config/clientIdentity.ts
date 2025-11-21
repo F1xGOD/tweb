@@ -3,6 +3,10 @@ const DEFAULT_USER_AGENT =
 const BASE_VERSION = `${import.meta.env.VITE_VERSION_FULL || import.meta.env.VITE_VERSION || ""}`.trim();
 const DEFAULT_APP_VERSION = BASE_VERSION ? `Fixcraft ${BASE_VERSION}` : "Fixcraft";
 const DEFAULT_SYSTEM_VERSION = "IridiumOS Linux";
+const FALLBACK_API_ID = 29718886;
+const FALLBACK_API_HASH = "a47426984744c41f207db51f48f9304e";
+const envApiId = Number.parseInt(`${import.meta.env.VITE_API_ID ?? ""}`, 10);
+const envApiHash = import.meta.env.VITE_API_HASH;
 
 type MaybeOverrides = {
 	apiId?: number | string;
@@ -37,8 +41,8 @@ const parsedAppVersion = rawOverrides?.appVersion?.trim() || undefined;
 const userAgent = parsedUserAgent || DEFAULT_USER_AGENT;
 
 export const TELEGRAM_CLIENT = {
-	apiId: parsedApiId,
-	apiHash: parsedApiHash,
+	apiId: parsedApiId ?? (Number.isFinite(envApiId) ? envApiId : FALLBACK_API_ID),
+	apiHash: parsedApiHash ?? envApiHash ?? FALLBACK_API_HASH,
 	userAgent,
 	deviceModel: parsedDeviceModel || userAgent,
 	systemVersion: parsedSystemVersion || DEFAULT_SYSTEM_VERSION,
