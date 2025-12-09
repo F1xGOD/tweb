@@ -20,6 +20,7 @@ import {IS_WEB_WORKER} from '../../helpers/context';
 import {DcId} from '../../types';
 import {getEnvironment} from '../../environment/utils';
 import SocketProxied from './transports/socketProxied';
+import {rewriteTelegramHttpUrl, rewriteTelegramWsUrl} from './tgProxy';
 
 export type TransportType = 'websocket' | 'https' | 'http';
 export type ConnectionType = 'client' | 'download' | 'upload';
@@ -47,7 +48,7 @@ export function constructTelegramWebSocketUrl(dcId: DcId, connectionType: Connec
 
   const suffix = getTelegramConnectionSuffix(connectionType);
   const path = connectionType !== 'client' ? 'apiws' + TEST_SUFFIX + (premium ? PREMIUM_SUFFIX : '') : ('apiws' + TEST_SUFFIX);
-  const chosenServer = `wss://${App.suffix.toLowerCase()}ws${dcId}${suffix}.web.telegram.org/${path}`;
+  const chosenServer = rewriteTelegramWsUrl(`wss://${App.suffix.toLowerCase()}ws${dcId}${suffix}.web.telegram.org/${path}`);
 
   return chosenServer;
 }
@@ -101,11 +102,11 @@ export class DcConfigurator {
       const suffix = getTelegramConnectionSuffix(connectionType);
       const subdomain = this.sslSubdomains[dcId - 1] + suffix;
       const path = Modes.test ? 'apiw_test1' : 'apiw1';
-      chosenServer = 'https://' + subdomain + '.web.telegram.org/' + path;
+      chosenServer = rewriteTelegramHttpUrl('https://' + subdomain + '.web.telegram.org/' + path);
     } else {
       for(const dcOption of this.dcOptions) {
         if(dcOption.id === dcId) {
-          chosenServer = 'http://' + dcOption.host + (dcOption.port !== 80 ? ':' + dcOption.port : '') + '/apiw1';
+          chosenServer = rewriteTelegramHttpUrl('http://' + dcOption.host + (dcOption.port !== 80 ? ':' + dcOption.port : '') + '/apiw1');
           break;
         }
       }

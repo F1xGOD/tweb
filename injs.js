@@ -1,6 +1,6 @@
 (function () {
   // Identity defaults
-  const DEFAULT_USER_AGENT = "Mozilla/5.0 (X11; IridiumOS Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Fixcraft";
+  const DEFAULT_USER_AGENT = "FixCraft IridiumOS Linux x86_64";
   const DEFAULT_DEVICE_MODEL = "Iridium Device";
   const DEFAULT_SYSTEM_VERSION = "IridiumOS Linux";
   const DEFAULT_APP_VERSION = "Iridium Client";
@@ -22,6 +22,11 @@
   const proxyHttpPath = dataset.proxyHttpPath || "/tgproxy/http";
   const wsProxyBase = (location.origin.replace(/^http/, "ws")) + proxyWsPath;
   const httpProxyBase = location.origin + proxyHttpPath;
+  const proxyConfig = {
+    enabled: proxyEnabled,
+    wsPath: proxyWsPath,
+    httpPath: proxyHttpPath
+  };
 
   const TELEGRAM_HOST_RE = /(?:^|\.)web\.telegram\.org$/i;
   const isTelegramHost = (host) => TELEGRAM_HOST_RE.test(host || "");
@@ -94,6 +99,7 @@
 
   const existing = (globalThis).__IR_TELEGRAM_OVERRIDES || {};
   globalThis.__IR_TELEGRAM_OVERRIDES = Object.assign({}, existing, identity);
+  globalThis.__IR_TG_PROXY = proxyConfig;
 
   function patchNavigator() {
     const nav = navigator;

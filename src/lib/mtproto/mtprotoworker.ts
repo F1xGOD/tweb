@@ -33,6 +33,7 @@ import idleController from '../../helpers/idleController';
 import ServiceMessagePort from '../serviceWorker/serviceMessagePort';
 import deferredPromise, {CancellablePromise} from '../../helpers/cancellablePromise';
 import {makeWorkerURL} from '../../helpers/setWorkerProxy';
+import {getTgProxyConfig} from './tgProxy';
 import ServiceWorkerURL from '../../../sw?worker&url';
 import setDeepProperty, {joinDeepPath, splitDeepPath} from '../../helpers/object/setDeepProperty';
 import getThumbKey from '../storages/utils/thumbs/getThumbKey';
@@ -791,16 +792,25 @@ class ApiManagerProxy extends MTProtoMessagePort {
       return;
     }
 
+    const proxyConfig = getTgProxyConfig();
+    const baseWorkerUrl = new URL('./mtproto.worker.ts', import.meta.url);
+    if(proxyConfig?.enabled) {
+      baseWorkerUrl.searchParams.set('tgProxy', '1');
+      if(proxyConfig.wsPath) baseWorkerUrl.searchParams.set('wsPath', proxyConfig.wsPath);
+      if(proxyConfig.httpPath) baseWorkerUrl.searchParams.set('httpPath', proxyConfig.httpPath);
+      if(proxyConfig.forceIp) baseWorkerUrl.searchParams.set('forceIp', proxyConfig.forceIp);
+    }
+
     let worker: SharedWorker | Worker;
     if(IS_SHARED_WORKER_SUPPORTED) {
       worker = new SharedWorker(
-        new URL('./mtproto.worker.ts', import.meta.url),
+        new URL(baseWorkerUrl),
         {type: 'module'}
       );
       this.closeMTProtoWorker = () => (worker as SharedWorker).port.close();
     } else {
       worker = new Worker(
-        new URL('./mtproto.worker.ts', import.meta.url),
+        new URL(baseWorkerUrl),
         {type: 'module'}
       );
       this.closeMTProtoWorker = () => (worker as Worker).terminate();

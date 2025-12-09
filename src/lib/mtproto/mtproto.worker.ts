@@ -7,6 +7,9 @@
 // just to include
 import '../polyfill';
 import '../../helpers/peerIdPolyfill';
+import {bootstrapTgProxyFromSearch} from './tgProxy';
+
+bootstrapTgProxyFromSearch();
 
 import cryptoWorker from '../crypto/cryptoMessagePort';
 import {setEnvironment} from '../../environment/utils';

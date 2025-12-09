@@ -51,7 +51,7 @@ const IRIDIUM_IDENTITY = readIridiumIdentity();
 
 const DEFAULT_USER_AGENT =
 	process.env.TWEB_USER_AGENT_OVERRIDE ||
-	"Mozilla/5.0 (X11; IridiumOS Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Fixcraft";
+	"FixCraft IridiumOS Linux x86_64";
 const DEFAULT_DEVICE_MODEL =
 	process.env.TWEB_DEVICE_MODEL ||
 	IRIDIUM_IDENTITY.friendly ||
